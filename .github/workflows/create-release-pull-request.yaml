@@ -1,0 +1,95 @@
+name: Create Release Pull Request
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "Package name to release (e.g., altfire_authenticator)"
+        required: true
+
+jobs:
+  set-version-and-branch:
+    name: Set version and branch name
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      branch: ${{ steps.set-output.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+
+      - name: Install Melos
+        run: dart pub global activate melos
+
+      - name: Bootstrap Melos
+        run: melos bootstrap
+
+      - name: Run `melos version` for the specified package
+        id: get-version
+        env:
+          MELOS_ALLOW_DIRTY: "true"
+        run: |
+          melos version --patch --no-private --yes --scope="${{ github.event.inputs.scope }}"
+          
+          VERSION=$(grep -m 1 'version:' packages/${{ github.event.inputs.scope }}/pubspec.yaml | awk '{print $2}')
+          echo "version=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set branch name
+        id: set-output
+        run: |
+          BRANCH_NAME="release/${{ github.event.inputs.scope }}-${{ env.version }}"
+          echo "branch=$BRANCH_NAME" >> "$GITHUB_ENV"
+          echo "branch=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+
+  create-branch:
+    name: Create release branch
+    runs-on: ubuntu-latest
+    needs: [set-version-and-branch]
+    env:
+      branch: ${{ needs.set-version-and-branch.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if branch already exists
+        run: |
+          if git ls-remote --exit-code --heads origin ${{ env.branch }}; then
+            echo "branch_exists=true" >> "$GITHUB_ENV"
+          else
+            echo "branch_exists=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create release branch
+        if: env.branch_exists == 'false'
+        run: |
+          git switch -c ${{ env.branch }}
+          git push origin ${{ env.branch }}
+
+  create-pr:
+    name: Create Pull-Request for release
+    runs-on: ubuntu-latest
+    needs: [set-version-and-branch, create-branch]
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      branch: ${{ needs.set-version-and-branch.outputs.branch }}
+      version: ${{ needs.set-version-and-branch.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.private-key }}
+
+      - name: Create release PR
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          title: "build: bump `${{ github.event.inputs.scope }}` to `${{ env.version }}`"
+          body: "This pull request was generated automatically by GitHub Actions."
+        run: gh pr create -B "main" -H "${{ env.branch }}" -t "${{ env.title }}" -b "${{ env.body }}" -a "$GITHUB_ACTOR"
